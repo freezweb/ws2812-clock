@@ -342,7 +342,7 @@ void setup()
 }
 boolean mqttreconnect() 
 {
-  if (client.connect("arduinoClient", "vbnet", "vbnet"))
+  if (client.connect("arduinoClient", "user", "password"))
   {
     client.subscribe("stream/uhr/render");
     client.subscribe("stream/uhr/farbe/digits");
