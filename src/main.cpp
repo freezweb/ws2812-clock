@@ -4,6 +4,7 @@
 #include <Time.h>
 #include <FastLED.h>
 #include <ESPAsyncE131.h>
+#include <PubSubClient.h>
 
 #define MY_NTP_SERVER "de.pool.ntp.org"
 #define MY_TZ "CET-1CEST,M3.5.0/02,M10.5.0/03"
@@ -16,17 +17,20 @@
 #define SEGMENTOFFSET 60
 #define COLONOFFSET 144
 
-#define UNIVERSE 1                      // First DMX Universe to listen for
-#define UNIVERSE_COUNT 1                // Total number of Universes to listen for, starting at UNIVERSE
+#define UNIVERSE 1       // First DMX Universe to listen for
+#define UNIVERSE_COUNT 1 // Total number of Universes to listen for, starting at UNIVERSE
+
+WiFiClient espClient;
+PubSubClient client(espClient);
 
 ESPAsyncE131 e131(UNIVERSE_COUNT);
 
 CRGB leds[NUM_LEDS];
 
-CRGB colorDigits = CRGB(0, 0, 255);
+CRGB colorDigits = CRGB(0, 255, 255);
 CRGB colorColon = CRGB(255, 255, 0);
-CRGB colorSeconds = CRGB(0, 255, 0);
-CRGB colorSeconds5 = CRGB(255, 0, 0);
+CRGB colorSeconds = CRGB(255, 0, 0);
+CRGB colorSeconds5 = CRGB(0, 255, 0);
 
 hw_timer_t *timer = NULL;
 time_t now;
@@ -34,6 +38,10 @@ struct tm tm;
 
 volatile bool halfSecondFlag = false;
 volatile bool newClockDrawFlag = false;
+
+char timebevore[70];
+
+long lastReconnectAttempt = 0;
 
 void ledInit();
 void printClock();
@@ -122,30 +130,29 @@ void showColon(int flag)
 void printDigit(uint8_t value, uint8_t position)
 {
   uint8_t segment[11][14] =
-  {
-    {// 0
-      1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0},
-    {// 1
-      0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0},
-    {// 2
-      1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1},
-    {// 3
-      1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1},
-    {// 4
-      0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1},
-    {// 5
-      1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1},
-    {// 6
-      1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-    {// 7
-      1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0},
-    {// 8
-      1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
-    {// 9
-      1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1},
-    {// off
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-  };
+      {
+          {// 0
+           1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0},
+          {// 1
+           0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+          {// 2
+           1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1},
+          {// 3
+           1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1},
+          {// 4
+           0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1},
+          {// 5
+           1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1},
+          {// 6
+           1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+          {// 7
+           1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0},
+          {// 8
+           1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+          {// 9
+           1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1},
+          {// off
+           0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
 
   for (int i = 0; i < 14; i++)
   {
@@ -214,6 +221,90 @@ void waitingForNtpSync()
   delay(250);
 }
 
+void callback(char *topic, byte *message, unsigned int length)
+{
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  String messageTemp;
+
+  for (int i = 0; i < length; i++)
+  {
+    Serial.print((char)message[i]);
+    messageTemp += (char)message[i];
+  }
+  Serial.println();
+
+  // Feel free to add more if statements to control more GPIOs with MQTT
+
+  // If a message is received on the topic esp32/output, you check if the message is either "on" or "off".
+  // Changes the output state according to the message
+  if (String(topic) == "stream/uhr/farbe/digits")
+  {
+    Serial.print("Changing digits to ");
+
+    char str_array[messageTemp.length()];
+    messageTemp.toCharArray(str_array, messageTemp.length());
+
+    Serial.println(strtol(str_array, NULL, 16));
+    colorDigits = strtol(str_array, NULL, 16);
+    Serial.println(colorDigits);
+
+  }
+  if (String(topic) == "stream/uhr/render")
+  {
+    Serial.println("Render now");
+    printClock();
+  }
+
+  if (String(topic) == "stream/uhr/farbe/colon")
+  {
+    Serial.print("Changing colon to ");
+
+    char str_array[messageTemp.length()];
+    messageTemp.toCharArray(str_array, messageTemp.length());
+
+    Serial.println(strtol(str_array, NULL, 16));
+    colorColon = strtol(str_array, NULL, 16);
+    Serial.println(colorColon);
+
+  }
+  if (String(topic) == "stream/uhr/farbe/seconds")
+  {
+    Serial.print("Changing seconds to ");
+
+    char str_array[messageTemp.length()];
+    messageTemp.toCharArray(str_array, messageTemp.length());
+
+    Serial.println(strtol(str_array, NULL, 16));
+    colorSeconds = strtol(str_array, NULL, 16);
+    Serial.println(colorSeconds);
+  
+  }
+  if (String(topic) == "stream/uhr/farbe/seconds5")
+  {
+    Serial.print("Changing seconds to ");
+
+    char str_array[messageTemp.length()];
+    messageTemp.toCharArray(str_array, messageTemp.length());
+
+    Serial.println(strtol(str_array, NULL, 16));
+    colorSeconds5 = strtol(str_array, NULL, 16);
+    Serial.println(colorSeconds5);
+
+  }
+
+  if (String(topic) == "stream/uhr/farbe/farbreset")
+  {
+    Serial.print("resetting all colors ");
+
+    colorDigits = CRGB(0, 255, 255);
+    colorColon = CRGB(255, 255, 0);
+    colorSeconds = CRGB(255, 0, 0);
+    colorSeconds5 = CRGB(0, 255, 0);
+ 
+  }
+}
 void setup()
 {
   Serial.begin(115200);
@@ -237,27 +328,66 @@ void setup()
 
   timerAlarmEnable(timer);
 
-  if (e131.begin(E131_MULTICAST, UNIVERSE, UNIVERSE_COUNT))   // Listen via Multicast
-      Serial.println(F("Listening for data..."));
-  else 
-      Serial.println(F("*** e131.begin failed ***"));
+  client.setServer("mqtt.esrv.center", 1883);
+  // client.connect("test123", "vbnet", "vbnet");
+  client.setKeepAlive(10);
+  client.setCallback(callback);
+  // client.subscribe("esp32/output");
 
+  lastReconnectAttempt = 0;
+  if (e131.begin(E131_MULTICAST, UNIVERSE, UNIVERSE_COUNT)) // Listen via Multicast
+    Serial.println(F("Listening for data..."));
+  else
+    Serial.println(F("*** e131.begin failed ***"));
 }
-
+boolean mqttreconnect() 
+{
+  if (client.connect("arduinoClient", "vbnet", "vbnet"))
+  {
+    client.subscribe("stream/uhr/render");
+    client.subscribe("stream/uhr/farbe/digits");
+    client.subscribe("stream/uhr/farbe/colon");
+    client.subscribe("stream/uhr/farbe/seconds");
+    client.subscribe("stream/uhr/farbe/seconds5");
+    client.subscribe("stream/uhr/farbe/farbreset");
+  }
+  return client.connected();
+}
 
 
 void loop()
 {
+
   wifictrl.check();
   ArduinoOTA.handle();
+  if (!client.connected())
+  {
+    long now = millis();
+    if (now - lastReconnectAttempt > 5000)
+    {
+      lastReconnectAttempt = now;
+      // Attempt to reconnect
+      if (mqttreconnect())
+      {
+        lastReconnectAttempt = 0;
+      }
+    }
+  }
+  else
+  {
+    // Client connected
+
+    client.loop();
+  }
+
   static uint32_t lastMulticastRxMs = 0;
 
-  if(!e131.isEmpty())
+  if (!e131.isEmpty())
   {
     lastMulticastRxMs = millis();
     e131_packet_t packet;
-    e131.pull(&packet);     // Pull packet from ring buffer
-    
+    e131.pull(&packet); // Pull packet from ring buffer
+
     // Serial.printf("Universe %u / %u Channels | Packet#: %u / Errors: %u / CH1: %u\n",
     //   htons(packet.universe),                 // The Universe for this packet
     //   htons(packet.property_value_count) - 1, // Start code is ignored, we're interested in dimmer data
@@ -265,19 +395,35 @@ void loop()
     //   e131.stats.packet_errors,               // Packet error counter
     //   packet.property_values[1]);             // Dimmer data for Channel 1
 
-    for(uint8_t i=0; i<NUM_LEDS;i++)
+    for (uint8_t i = 0; i < NUM_LEDS; i++)
     {
-      leds[i] = CRGB(packet.property_values[i*3+1], packet.property_values[i*3+2], packet.property_values[i*3+3]);
+      leds[i] = CRGB(packet.property_values[i * 3 + 1], packet.property_values[i * 3 + 2], packet.property_values[i * 3 + 3]);
     }
     FastLED.show();
   }
 
-
-  if(millis() > (lastMulticastRxMs + 3000) && newClockDrawFlag)
+  if (millis() > (lastMulticastRxMs + 3000) && newClockDrawFlag)
   {
     newClockDrawFlag = false;
     time(&now);
     localtime_r(&now, &tm);
+    char timenow[70];
+    // char *timenow = asctime(localtime(&now));
+    if (strftime(timenow, sizeof timenow, "%H:%M ", localtime(&now)))
+    {
+
+      if (strcmp(timebevore, timenow) != 0)
+      {
+
+        client.publish("stream/uhr/zeit", timenow);
+        strcpy(timebevore, timenow);
+      }
+    }
+    else
+    {
+      puts("strftime failed");
+    }
+
     printClock();
   }
 }
